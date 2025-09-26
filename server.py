@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import zipfile
+import requests
 
 # Security: simple bearer token so only your GPT Action can call this
 API_BEARER = os.getenv("API_BEARER", "")
@@ -36,6 +37,9 @@ DEFAULT_LANGS = [
     "ja-JP","ko-KR"
 ]
 
+# ------------------------------------------------
+# Endpoint 1: multipart upload (manual use / curl)
+# ------------------------------------------------
 @app.post("/translate-vtt")
 async def translate_vtt(
     file: UploadFile = File(..., description="Source .vtt file"),
@@ -49,15 +53,12 @@ async def translate_vtt(
     if not file.filename.lower().endswith(".vtt"):
         raise HTTPException(status_code=400, detail="Only .vtt files are supported")
 
-    # Build language list
     langs_list: List[str] = DEFAULT_LANGS if not langs else langs.split()
 
-    # Ensure translator script is present
     translator_path = os.path.join(os.path.dirname(__file__), "vtt_multilang_translator.py")
     if not os.path.exists(translator_path):
         raise HTTPException(status_code=500, detail="Translator script not found on server")
 
-    # Check OpenAI key
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set on server")
 
@@ -66,7 +67,6 @@ async def translate_vtt(
         with open(src_path, "wb") as f:
             f.write(await file.read())
 
-        # Run translator script
         cmd = [
             "python", translator_path,
             src_path,
@@ -81,7 +81,6 @@ async def translate_vtt(
                 content={"error": "translation_failed", "stdout": e.stdout, "stderr": e.stderr},
             )
 
-        # Zip outputs
         zip_path = os.path.join(tmp, "translations.zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
             base = os.path.splitext(os.path.basename(src_path))[0]
@@ -91,17 +90,79 @@ async def translate_vtt(
 
         return FileResponse(zip_path, media_type="application/zip", filename="translations.zip")
 
+# ------------------------------------------------
+# Endpoint 2: JSON file_url (for GPT Actions)
+# ------------------------------------------------
+@app.post("/translate-vtt-url")
+async def translate_vtt_url(
+    payload: dict,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    JSON endpoint for GPT Actions that pass a file URL instead of multipart.
+    Body example:
+    {
+      "file_url": "https://.../the-uploaded.vtt",
+      "wrap": 42,
+      "model": "gpt-4o-mini",
+      "langs": "ja-JP it-IT de-DE es-ES"
+    }
+    """
+    verify_bearer(authorization)
 
-# ------------------------
-# Extra endpoints
-# ------------------------
+    file_url = payload.get("file_url")
+    if not file_url or not isinstance(file_url, str):
+        raise HTTPException(status_code=400, detail="file_url is required")
 
+    wrap = int(payload.get("wrap", 42))
+    model = payload.get("model", "gpt-4o-mini")
+    langs = payload.get("langs")
+    langs_list: List[str] = DEFAULT_LANGS if not langs else langs.split()
+
+    translator_path = os.path.join(os.path.dirname(__file__), "vtt_multilang_translator.py")
+    if not os.path.exists(translator_path):
+        raise HTTPException(status_code=500, detail="Translator script not found on server")
+
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set on server")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = os.path.join(tmp, "source.vtt")
+        try:
+            r = requests.get(file_url, timeout=60)
+            r.raise_for_status()
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not download file_url: {e}")
+        with open(src_path, "wb") as f:
+            f.write(r.content)
+
+        cmd = [
+            "python", translator_path, src_path,
+            "--langs", *langs_list, "--model", model
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            return JSONResponse(status_code=500, content={"error":"translation_failed","stdout":e.stdout,"stderr":e.stderr})
+
+        zip_path = os.path.join(tmp, "translations.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            base = os.path.splitext(os.path.basename(src_path))[0]
+            for name in os.listdir(tmp):
+                if name.startswith(base + ".") and name.endswith(".vtt"):
+                    z.write(os.path.join(tmp, name), arcname=name)
+
+        return FileResponse(zip_path, media_type="application/zip", filename="translations.zip")
+
+# ------------------------------------------------
+# Extra endpoints for policies + monitoring
+# ------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 def root():
     return """
     <html><body style="font-family: sans-serif; max-width: 720px; margin: 2rem auto;">
       <h2>VTT Translator API</h2>
-      <p>Use <code>/translate-vtt</code> to upload .vtt files.</p>
+      <p>Use <code>/translate-vtt</code> (multipart) or <code>/translate-vtt-url</code> (JSON) to upload .vtt files.</p>
       <p>See <a href="/privacy">Privacy Policy</a> and <a href="/terms">Terms of Use</a>.</p>
     </body></html>
     """
