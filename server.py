@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import zipfile
 import requests
+import base64  # add near the top with other imports
 
 # Security: simple bearer token so only your GPT Action can call this
 API_BEARER = os.getenv("API_BEARER", "")
@@ -140,6 +141,70 @@ async def translate_vtt_url(
             "python", translator_path, src_path,
             "--langs", *langs_list, "--model", model
         ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            return JSONResponse(status_code=500, content={"error":"translation_failed","stdout":e.stdout,"stderr":e.stderr})
+
+        zip_path = os.path.join(tmp, "translations.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            base = os.path.splitext(os.path.basename(src_path))[0]
+            for name in os.listdir(tmp):
+                if name.startswith(base + ".") and name.endswith(".vtt"):
+                    z.write(os.path.join(tmp, name), arcname=name)
+
+        return FileResponse(zip_path, media_type="application/zip", filename="translations.zip")
+
+# ------------------------------------------------
+# Endpoint 3: JSON base64 bytes (for GPT fallback)
+# ------------------------------------------------
+@app.post("/translate-vtt-bytes")
+async def translate_vtt_bytes(
+    payload: dict,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    JSON endpoint for GPT Actions that pass the file content inline.
+    Body example:
+    {
+      "filename": "townhall.vtt",
+      "data_base64": "<base64 bytes>",
+      "wrap": 42,
+      "model": "gpt-4o-mini",
+      "langs": "ja-JP it-IT de-DE es-ES"  # optional; defaults to corporate 12
+    }
+    """
+    verify_bearer(authorization)
+
+    filename = payload.get("filename") or "source.vtt"
+    data_b64 = payload.get("data_base64")
+    if not data_b64 or not isinstance(data_b64, str):
+        raise HTTPException(status_code=400, detail="data_base64 is required")
+
+    wrap = int(payload.get("wrap", 42))
+    model = payload.get("model", "gpt-4o-mini")
+    langs = payload.get("langs")
+    langs_list: List[str] = DEFAULT_LANGS if not langs else langs.split()
+
+    translator_path = os.path.join(os.path.dirname(__file__), "vtt_multilang_translator.py")
+    if not os.path.exists(translator_path):
+        raise HTTPException(status_code=500, detail="Translator script not found on server")
+
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set on server")
+
+    # decode and process
+    try:
+        raw = base64.b64decode(data_b64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid base64: {e}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = os.path.join(tmp, filename if filename.endswith(".vtt") else "source.vtt")
+        with open(src_path, "wb") as f:
+            f.write(raw)
+
+        cmd = ["python", translator_path, src_path, "--langs", *langs_list, "--model", model]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
