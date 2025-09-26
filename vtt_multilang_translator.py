@@ -1,126 +1,114 @@
-#!/usr/bin/env python3
 """
-vtt_multilang_translator.py
-
-Translate a .vtt subtitle file into multiple target languages while preserving
-timestamps, cue structure, speaker labels, and markup.
+VTT Multilang Translator
+Translates WebVTT (.vtt) subtitle files into multiple target languages.
 
 Usage:
-  export OPENAI_API_KEY=sk-...
-  python vtt_multilang_translator.py /path/to/file.vtt --langs ja-JP it-IT de-DE es-ES --model gpt-4o-mini
+    export OPENAI_API_KEY=sk-...
+    python vtt_multilang_translator.py /path/to/file.vtt --langs ja-JP it-IT de-DE es-ES --wrap 42
 """
 
 import argparse, os, re, sys, json, time
 from typing import List, Dict
-from dataclasses import dataclass
+from openai import OpenAI
 
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-TIMECODE_RE = re.compile(
-    r'^(?P<start>\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*'
-    r'(?P<end>\d{2}:\d{2}:\d{2}\.\d{3})(?P<rest>.*)$'
-)
+DEFAULT_LANGS = [
+    "de-DE", "fr-FR", "it-IT", "nl-NL",
+    "da-DK", "es-ES", "nb-NO", "sv-SE",
+    "zh-CN", "zh-TW", "ja-JP", "ko-KR"
+]
 
-@dataclass
-class Cue:
-    idx: int
-    timecode: str
-    text_lines: List[str]
-
-def parse_vtt(path: str):
-    with open(path, "r", encoding="utf-8") as f:
-        lines = f.read().splitlines()
-    if not lines or not lines[0].startswith("WEBVTT"):
-        raise ValueError("Not a VTT file")
-
-    # Skip header lines
-    i = 1
-    while i < len(lines) and lines[i].strip() != "":
-        i += 1
-    if i < len(lines) and lines[i].strip() == "":
-        i += 1
-
+def parse_vtt(text: str) -> List[Dict]:
+    """Parse .vtt file into list of cues."""
+    blocks = re.split(r"\n\n+", text.strip())
     cues = []
-    idx = 0
-    while i < len(lines):
-        if lines[i].strip().isdigit():
-            i += 1
-        if i >= len(lines):
-            break
-        if not TIMECODE_RE.match(lines[i]):
-            i += 1
+    for block in blocks:
+        lines = block.splitlines()
+        if not lines:
             continue
-        timecode = lines[i]; i += 1
-        text = []
-        while i < len(lines) and lines[i].strip() != "":
-            text.append(lines[i]); i += 1
-        if i < len(lines) and lines[i].strip() == "":
-            i += 1
-        cues.append(Cue(idx, timecode, text))
-        idx += 1
-    return "WEBVTT", cues
+        cue = {"id": None, "time": None, "text": []}
+        if re.match(r"^\d+$", lines[0]):
+            cue["id"] = lines[0]
+            lines = lines[1:]
+        if lines and "-->" in lines[0]:
+            cue["time"] = lines[0]
+            lines = lines[1:]
+        cue["text"] = lines
+        cues.append(cue)
+    return cues
 
-SYSTEM_PROMPT = """You are a professional subtitle translator.
-Translate only the natural language text into the TARGET language.
-Preserve:
-- timestamps (not for translation)
-- cue order and count
-- line breaks inside cues
-- speaker labels (>> or NAME:)
-- inline tags (<i>, <b>, <u>, <c>, <v>, <lang>)
-- numbers, product codes, acronyms
-Return JSON with: {"items": [{"id":0,"text":"..."}, ...]}.
+def reassemble_vtt(cues: List[Dict]) -> str:
+    """Reassemble cues into VTT text."""
+    out = ["WEBVTT\n"]
+    for cue in cues:
+        if cue["id"]:
+            out.append(cue["id"])
+        if cue["time"]:
+            out.append(cue["time"])
+        out.extend(cue["text"])
+        out.append("")  # blank line
+    return "\n".join(out).strip() + "\n"
+
+def translate_text(text: str, target_lang: str, model: str = "gpt-4.1-mini", wrap: int = 42) -> str:
+    """Translate a block of text into the target language."""
+    prompt = f"""You are a subtitle translator.
+Translate the following lines into {target_lang}.
+Rules:
+- Keep cue numbers, timestamps, and settings unchanged.
+- Only translate the spoken text.
+- Keep line breaks and brackets (like [music]) intact.
+- Wrap lines at ~{wrap} characters max.
+
+Text:
+{text}
 """
-
-def translate_batch(client, model, batch: List[Cue], lang: str):
-    payload = [{"id": c.idx, "text": "\n".join(c.text_lines)} for c in batch]
-    user_prompt = json.dumps({"TARGET": lang, "items": payload}, ensure_ascii=False)
-    resp = client.responses.create(
+    response = client.chat.completions.create(
         model=model,
-        temperature=0,
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
     )
-    data = json.loads(resp.output_text)
-    return {int(item["id"]): item["text"] for item in data["items"]}
+    return response.choices[0].message.content.strip()
 
-def write_vtt(header: str, cues: List[Cue], translations: Dict[int, str], out_path: str):
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(header + "\n\n")
-        for c in cues:
-            f.write(f"{c.idx+1}\n")
-            f.write(c.timecode + "\n")
-            t = translations.get(c.idx, "\n".join(c.text_lines))
-            f.write(t + "\n\n")
+def translate_vtt_file(infile: str, langs: List[str], model: str = "gpt-4.1-mini", wrap: int = 42):
+    """Translate a .vtt file into multiple target languages."""
+    with open(infile, "r", encoding="utf-8") as f:
+        src_text = f.read()
+
+    cues = parse_vtt(src_text)
+
+    results = {}
+    for lang in langs:
+        translated_cues = []
+        for cue in cues:
+            if not cue["text"]:
+                translated_cues.append(cue.copy())
+                continue
+            joined = "\n".join(cue["text"])
+            translated = translate_text(joined, lang, model=model, wrap=wrap)
+            new_cue = cue.copy()
+            new_cue["text"] = translated.splitlines()
+            translated_cues.append(new_cue)
+        results[lang] = reassemble_vtt(translated_cues)
+
+    return results
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("vtt", help="Path to input .vtt")
-    ap.add_argument("--langs", nargs="+", required=True, help="Target languages, e.g. ja-JP de-DE")
-    ap.add_argument("--model", default="gpt-4o-mini", help="Model to use")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("infile", help="Input .vtt file")
+    parser.add_argument("--langs", nargs="+", default=DEFAULT_LANGS, help="Target language codes")
+    parser.add_argument("--model", default="gpt-4.1-mini", help="OpenAI model (default gpt-4.1-mini)")
+    parser.add_argument("--wrap", type=int, default=42, help="Line wrap length")
+    args = parser.parse_args()
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        print("Missing OPENAI_API_KEY", file=sys.stderr)
-        sys.exit(1)
-    client = OpenAI(api_key=api_key)
+    outputs = translate_vtt_file(args.infile, args.langs, model=args.model, wrap=args.wrap)
 
-    header, cues = parse_vtt(args.vtt)
-
-    for lang in args.langs:
-        translations = {}
-        for i in range(0, len(cues), 50):
-            sub = cues[i:i+50]
-            translations.update(translate_batch(client, args.model, sub, lang))
-        out_path = os.path.splitext(args.vtt)[0] + "." + lang + ".vtt"
-        write_vtt(header, cues, translations, out_path)
-        print("Wrote", out_path)
+    base = os.path.splitext(args.infile)[0]
+    for lang, text in outputs.items():
+        outname = f"{base}.{lang}.vtt"
+        with open(outname, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"Wrote {outname}")
 
 if __name__ == "__main__":
     main()
