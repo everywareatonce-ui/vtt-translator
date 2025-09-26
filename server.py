@@ -8,6 +8,62 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import zipfile
 
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    return "<html><body><h2>VTT Translator API</h2><p>See <a href='/privacy'>Privacy</a> and <a href='/terms'>Terms</a>.</p></body></html>"
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy():
+    return """
+    <html><head><title>Privacy Policy — VTT Translator</title></head>
+    <body style="font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto;">
+      <h1>Privacy Policy — VTT Translator</h1>
+      <p><strong>Last updated:</strong> 2025-09-26</p>
+      <h2>What we process</h2>
+      <p>When you use the action, you upload a WebVTT (.vtt) subtitle file. The service processes the text in your file to produce translations in selected languages.</p>
+      <h2>How we use your data</h2>
+      <ul>
+        <li>We send the subtitle text to OpenAI’s API for translation.</li>
+        <li>We do not sell or share your data with third parties for advertising.</li>
+        <li>We use a bearer token to restrict access to the API.</li>
+      </ul>
+      <h2>Retention</h2>
+      <p>Uploaded files and generated translations are stored only in a temporary working directory during processing and are deleted after the request completes. We do not maintain persistent logs of subtitle content.</p>
+      <h2>Security</h2>
+      <p>Access is limited via an Authorization bearer token configured by the owner. Use HTTPS endpoints only.</p>
+      <h2>Your responsibility</h2>
+      <p>Do not upload confidential or regulated data unless you have rights to process it with OpenAI’s API under your organization’s policies.</p>
+      <h2>Contact</h2>
+      <p>For questions or requests, contact: <a href="mailto:owner@example.com">owner@example.com</a>.</p>
+    </body></html>
+    """
+
+@app.get("/terms", response_class=HTMLResponse)
+def terms():
+    return """
+    <html><head><title>Terms of Use — VTT Translator</title></head>
+    <body style="font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto;">
+      <h1>Terms of Use — VTT Translator</h1>
+      <p><strong>Last updated:</strong> 2025-09-26</p>
+      <h2>Service</h2>
+      <p>This endpoint translates WebVTT files using OpenAI's API and returns translated VTT files.</p>
+      <h2>Acceptable Use</h2>
+      <ul>
+        <li>You must have the right to process the content you upload.</li>
+        <li>No illegal, abusive, or infringing content.</li>
+        <li>No attempts to bypass authentication or probe the service.</li>
+      </ul>
+      <h2>Disclaimer</h2>
+      <p>The service is provided “as is” without warranties. Output may contain errors. You are responsible for review and compliance.</p>
+      <h2>Liability</h2>
+      <p>To the maximum extent permitted by law, the operator is not liable for indirect or consequential damages.</p>
+      <h2>Contact</h2>
+      <p>Questions: <a href="mailto:owner@example.com">owner@example.com</a>.</p>
+    </body></html>
+    """
+
 # Security: simple bearer token so only your GPT Action can call this
 API_BEARER = os.getenv("API_BEARER", "")
 
